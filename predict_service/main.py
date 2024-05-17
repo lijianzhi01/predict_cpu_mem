@@ -1,11 +1,11 @@
 import requests
 import torch
 from sklearn.preprocessing import MinMaxScaler  
-from statsmodels.tsa.seasonal import STL  
 import pandas as pd  
 import numpy as np  
 from kubernetes import client, config  
 import time
+import AttnConvLSTM
 
 # Load kube config  
 config.load_kube_config()  
@@ -13,9 +13,9 @@ config.load_kube_config()
 # Define the parameters for the query  
 params = {  
     'query': 'sum(rate(container_cpu_usage_seconds_total{container_label_io_kubernetes_pod_namespace="demo"}[30s]))',  
-    'start': time.time() - 3600,  
+    'start': time.time() - 3600 * 4,  
     'end': time.time(),  
-    'step': 60,  
+    'step': 60,  # define the interval of time (in seconds) between each data point
 }  
   
 # Send the GET request to the Prometheus API  
@@ -35,62 +35,42 @@ data = response.json()
 #                 [1715947633.249, "0.46809806103791185"], // 2024-05-17 20:07:13
 #                 [1715947693.249, "0.41559276797697664"],
 #                 [1715947753.249, "0.48254878836485465"],
-#                 [1715947813.249, "0.4374023430589249"]
+#                 [1715947813.249, "0.4374023430589249"],
+#                 ......
 # 			]
 # 		}]
 # 	}
 # }
+seq_length_in = 144
+seq_length_out = 6
+input_size = 1
+num_epochs = 100  
+learning_rate = 0.01  
+hidden_size = 10  
+num_layers = 1  
+kernel_size = 20
+output_size = seq_length_out  
+device = torch.device("cpu")  
 values = data['data']['result'][0]['values']
-df = pd.DataFrame(values, columns=['time', 'cpu_usage'])
-df.reset_index(drop=True, inplace=True)  
-df['cpu_usage'] = df['cpu_usage'].astype(float)
-df = df.iloc[:48]
+df = pd.DataFrame(values, columns=['timestamp', 'cpu_usage'])
+df = df.iloc[-seq_length_in:]
 print(df)
 
 scaler = MinMaxScaler(feature_range=(0, 1))  
-df['cpu_usage'] = scaler.fit_transform(df['cpu_usage'].values.reshape(-1, 1))  
-stl = STL(df['cpu_usage'], seasonal=12)  
-result = stl.fit()  
-df['trend'] = result.trend  
-df['detrended'] = df['cpu_usage'] - df['trend']  
+df['cpu_usage'] = scaler.fit_transform(df['cpu_usage'].values.reshape(-1,1))  
+cpu_usage = torch.FloatTensor(df['cpu_usage'].values).to(device)  
+cpu_usage = torch.FloatTensor(cpu_usage).view(-1, seq_length_in, input_size).to(device)  
 
-seq_length_in = 48  
-input_size = 1
-trend_data = df['trend'].values[-seq_length_in:]  
-detrended_data = df['detrended'].values[-seq_length_in:]  
+model = AttnConvLSTM.AttnConvLSTM(input_size, hidden_size, num_layers, output_size, kernel_size).to(device)
+state_dict = torch.load('./models/8_LSTM_seq2seq_multiple_machine_miniSGD.pth', map_location=device)
+model.load_state_dict(state_dict)
 
-model = torch.load('./models/10.4_LSTM_STL_Attenton_FFT_seq2seq_one_machine_miniSGD.pth')  
-model.load_state_dict(torch.load('./models/10.4_LSTM_STL_Attenton_FFT_seq2seq_one_machine_miniSGD.pth'))  
-
-# Convert them to tensor and reshape them to match the input format of your model  
-trend_tensor = torch.FloatTensor(trend_data).view(-1, seq_length_in, input_size)  
-detrended_tensor = torch.FloatTensor(detrended_data).view(-1, seq_length_in, input_size)  
-  
-# Move your tensors to the correct device  
-device = torch.device("cpu")  
-trend_tensor = trend_tensor.to(device)  
-detrended_tensor = detrended_tensor.to(device)  
-  
 # Use your model to predict the future CPU usage  
 model.eval()  # Set the model to evaluation mode  
 with torch.no_grad():  
-    prediction = model(trend_tensor, detrended_tensor)  
-  
+    prediction = model(cpu_usage).to(device)
+
 # Convert the prediction to a numpy array  
 prediction = prediction.cpu().numpy()  
 
 print(prediction)
-  
-# Here you can add your logic  
-# For example, you might want to calculate the average  
-# average = sum(my_metric_data) / len(my_metric_data)  
-  
-# # Create a new HPA object  
-# v2beta2 = client.AutoscalingV2beta2Api()  
-  
-# # Fetch the current HPA  
-# hpa = v2beta2.read_namespaced_horizontal_pod_autoscaler(name='my-hpa', namespace='default')  
-  
-# # Update the HPA  
-# hpa.spec.min_replicas = average  # Just an example, you'll need to adjust this based on your logic  
-# v2beta2.patch_namespaced_horizontal_pod_autoscaler(name='my-hpa', namespace='default', body=hpa)  
