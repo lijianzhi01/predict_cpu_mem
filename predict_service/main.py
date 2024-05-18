@@ -2,20 +2,29 @@ import requests
 import torch
 from sklearn.preprocessing import MinMaxScaler  
 import pandas as pd  
-import numpy as np  
+import datetime
 from kubernetes import client, config  
 import time
 import AttnConvLSTM
 
 # Load kube config  
 config.load_kube_config()  
-  
+
+step = 15
+def round_time_to_nearest_sec(t):  
+    # Round the time to the nearest step seconds  
+    return (t // step) * step
+
+now = time.time()
+start = round_time_to_nearest_sec(now - 3600 * 4)  
+end = round_time_to_nearest_sec(now)  
+
 # Define the parameters for the query  
 params = {  
     'query': 'sum(rate(container_cpu_usage_seconds_total{container_label_io_kubernetes_pod_namespace="demo"}[30s]))',  
-    'start': time.time() - 3600 * 4,  
-    'end': time.time(),  
-    'step': 60,  # define the interval of time (in seconds) between each data point
+    'start': start,  
+    'end': end,  
+    'step': step,  # define the interval of time (in seconds) between each data point
 }  
   
 # Send the GET request to the Prometheus API  
@@ -52,8 +61,10 @@ kernel_size = 20
 output_size = seq_length_out  
 device = torch.device("cpu")  
 values = data['data']['result'][0]['values']
+values = values[-seq_length_in:]
 df = pd.DataFrame(values, columns=['timestamp', 'cpu_usage'])
-df = df.iloc[-seq_length_in:]
+df['timestamp'] = df['timestamp'].astype(int)
+df['timestamp'] = df['timestamp'].apply(lambda x: datetime.datetime.fromtimestamp(x).strftime('%Y-%m-%d %H:%M:%S'))
 print(df)
 
 scaler = MinMaxScaler(feature_range=(0, 1))  
